@@ -1,68 +1,56 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.6.6;
+pragma solidity >=0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/math/SafeMath.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import {IERC20Upgradeable as IERC20} from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import {SafeERC20Upgradeable as SafeERC20} from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 
-contract FR is Ownable {
-    using SafeMath for uint256;
+contract FR is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
 
     uint256 private constant PERCENTAGE_BASE = 100000;
 
-    mapping(address => uint256) tokenLeftover;
+    mapping(address => uint256) public tokenLeftover;
 
     receive() external payable {}
+
+    function initialize() external initializer {
+        __Ownable_init();
+    }
 
     function swapExactEthForTokensUniV2(
         address router,
         address[] calldata path,
-        uint256 amountEth, // todo calculate amount inside this function
-        uint256 maxSlippage,
+        uint256 amountEthMax,
+        uint256 amountOutMin,
         uint256 deadline
-    )
-        external
-        onlyOwner
-        returns (
-            uint256 amountOutGet,
-            uint256 amountOutMin,
-            uint256 priceImpact
-        )
-    {
+    ) external onlyOwner returns (uint256 amountOutGet, uint256 amountOut) {
         uint256 tokenIndex = path.length - 1;
         address token = path[tokenIndex];
 
         IUniswapV2Router02 _router = IUniswapV2Router02(router);
 
-        uint256 amountOut = _router.getAmountsOut(amountEth, path)[tokenIndex];
+        amountOut = _router.getAmountsOut(amountEthMax, path)[path.length - 1];
 
-        amountOutMin = subSlippage(amountOut, maxSlippage);
-        // todo: calculate price impact
-
-        amountOutGet = _router.swapExactETHForTokens{value: amountEth}(
+        amountOutGet = _router.swapExactETHForTokens{value: amountEthMax}(
             amountOutMin,
             path,
             address(this),
             deadline
         )[tokenIndex];
-        // todo
 
-        tokenLeftover[token] = tokenLeftover[token].add(amountOutGet);
+        tokenLeftover[token] += amountOutGet;
     }
 
     function swapExactTokensForEthUniV2(
         address router,
         address[] calldata path,
-        uint256 maxSlippage,
+        uint256 slippage,
         uint256 deadline
-    )
-        external
-        onlyOwner
-        returns (uint256 amountOutGet, uint256 amountOutEthMin)
-    {
+    ) external onlyOwner returns (uint256 amountOutGet, uint256 amountOut) {
         uint256 lastIndex = path.length - 1;
         address token = path[0];
 
@@ -70,15 +58,13 @@ contract FR is Ownable {
 
         IUniswapV2Router02 _router = IUniswapV2Router02(router);
 
-        uint256 amountOutEth = _router.getAmountsOut(amountToSwap, path)[
-            lastIndex
-        ];
+        amountOut = _router.getAmountsOut(amountToSwap, path)[path.length - 1];
 
-        amountOutEthMin = subSlippage(amountOutEth, maxSlippage);
+        _approveIfNeeded(token, router, amountToSwap);
 
         amountOutGet = _router.swapExactTokensForETH(
-            amountToSwap,
-            amountOutEthMin,
+            amountToSwap,  
+            (amountOut * PERCENTAGE_BASE) / (slippage + PERCENTAGE_BASE),
             path,
             address(this),
             deadline
@@ -87,21 +73,64 @@ contract FR is Ownable {
         tokenLeftover[token] = 0;
     }
 
-    function withdrawEth(uint256 amount) external onlyOwner {
-        payable(address(msg.sender)).transfer(amount);
+    function approve(
+        address token,
+        address spender,
+        uint256 amount
+    ) external onlyOwner {
+        IERC20(token).approve(spender, amount);
     }
 
-    function withdrawTokens(address token, uint256 amount) external onlyOwner {
-        IERC20(token).safeTransfer(msg.sender, amount);
-        if (tokenLeftover[msg.sender] >= amount)
-            tokenLeftover[msg.sender] = tokenLeftover[msg.sender].sub(amount);
-    }
-
-    function subSlippage(uint256 val, uint256 slippage)
-        private
-        pure
-        returns (uint256)
+    function withdrawEth(uint256 amount, address payable to)
+        external
+        onlyOwner
     {
-        return val.sub(val.mul(slippage).div(PERCENTAGE_BASE));
+        to.transfer(amount);
+    }
+
+    function withdrawTokens(
+        address token,
+        uint256 amount,
+        address to
+    ) external onlyOwner {
+        require(to != address(0), "!address");
+
+        IERC20(token).safeTransfer(to, amount);
+
+        if (tokenLeftover[_msgSender()] == 0) return;
+
+        if (tokenLeftover[_msgSender()] >= amount)
+            tokenLeftover[_msgSender()] -= amount;
+        else tokenLeftover[_msgSender()] = 0;
+    }
+
+    function getReservesV2(
+        address router,
+        address tokenA,
+        address tokenB
+    ) external view returns (uint256 reserveA, uint256 reserveB) {
+        IUniswapV2Pair pair = IUniswapV2Pair(
+            IUniswapV2Factory(IUniswapV2Router02(router).factory()).getPair(
+                tokenA,
+                tokenB
+            )
+        );
+
+        address token0 = tokenA < tokenB ? tokenA : tokenB;
+
+        (uint256 reserve0, uint256 reserve1, ) = pair.getReserves();
+
+        (reserveA, reserveB) = tokenA == token0
+            ? (reserve0, reserve1)
+            : (reserve1, reserve0);
+    }
+
+    function _approveIfNeeded(
+        address token,
+        address spender,
+        uint256 transferAmount
+    ) private {
+        if (transferAmount > IERC20(token).allowance(address(this), spender))
+            IERC20(token).approve(spender, type(uint256).max);
     }
 }

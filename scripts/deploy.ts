@@ -1,10 +1,10 @@
-import { ethers } from "hardhat";
+import { ethers, upgrades } from 'hardhat';
 import { FR__factory } from "../typechain"
 
 async function main() {
   const [deployer] = await ethers.getSigners();
 
-  const fr = await new FR__factory(deployer).deploy();
+  const fr = await (await upgrades.deployProxy(new FR__factory(deployer))).deployed();
 
   console.log("FR deployment tx hash:", fr.deployTransaction.hash);
 
