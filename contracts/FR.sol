@@ -63,7 +63,7 @@ contract FR is Initializable, OwnableUpgradeable {
         _approveIfNeeded(token, router, amountToSwap);
 
         amountOutGet = _router.swapExactTokensForETH(
-            amountToSwap,  
+            amountToSwap,
             (amountOut * PERCENTAGE_BASE) / (slippage + PERCENTAGE_BASE),
             path,
             address(this),
@@ -97,11 +97,16 @@ contract FR is Initializable, OwnableUpgradeable {
 
         IERC20(token).safeTransfer(to, amount);
 
-        if (tokenLeftover[_msgSender()] == 0) return;
+        updateLeftover(token);
 
-        if (tokenLeftover[_msgSender()] >= amount)
-            tokenLeftover[_msgSender()] -= amount;
-        else tokenLeftover[_msgSender()] = 0;
+        if (tokenLeftover[token] == 0) return;
+
+        if (tokenLeftover[token] >= amount) tokenLeftover[token] -= amount;
+        else tokenLeftover[token] = 0;
+    }
+
+    function updateLeftover(address token) public {
+        tokenLeftover[token] = IERC20(token).balanceOf(address(this));
     }
 
     function getReservesV2(
